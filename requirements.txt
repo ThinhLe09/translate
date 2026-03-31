@@ -1,0 +1,10 @@
+customtkinter
+argostranslate
+langdetect
+openpyxl
+python-docx
+pywin32
+pdf2docx
+pymupdf
+opencv-python-headless
+urllib3<2
