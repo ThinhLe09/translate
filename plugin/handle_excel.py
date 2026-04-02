@@ -4,7 +4,8 @@ import re
 from langdetect import detect
 import argostranslate.translate
 import argostranslate.sbd
-from concurrent.futures import ThreadPoolExecutor, as_completed # THÊM THƯ VIỆN ĐA LUỒNG
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 
 def offline_split_sentences(self, text):
     sentences = re.split(r'(?<=[.!?。！？])\s*', text)
@@ -14,13 +15,14 @@ for name, obj in vars(argostranslate.sbd).items():
     if isinstance(obj, type) and hasattr(obj, 'split_sentences'):
         setattr(obj, 'split_sentences', offline_split_sentences)
 
+@lru_cache(maxsize=50000)
 def get_translator(from_code, to_code):
     installed_languages = argostranslate.translate.get_installed_languages()
     lang_dict = {lang.code: lang for lang in installed_languages}
     if from_code in lang_dict and to_code in lang_dict:
         return lang_dict[from_code].get_translation(lang_dict[to_code])
     return None
-
+@lru_cache(maxsize=50000)
 def smart_detect_lang(text):
     if not text or not text.strip():
         return 'unknown'
@@ -49,33 +51,40 @@ def do_translation(text, source_code, target_lang_code):
             return trans_to_target.translate(en_text)
     return text
 
-# Hàm con được tách ra để chạy đa luồng
 def worker_translate_cell(original_text, target_lang_code):
-    lines = original_text.splitlines(keepends=False)
-    translated_lines = []
-    is_translated = False 
+    # Kiểm tra ô rỗng
+    if not original_text or not str(original_text).strip():
+        return original_text, False
 
-    for line in lines:
-        if not line.strip():
-            translated_lines.append("")
-            continue
-        try:
-            source_code = smart_detect_lang(line)
-            trans_line = do_translation(line, source_code, target_lang_code)
-            translated_lines.append(trans_line)
-            if trans_line != line:
-                is_translated = True
-        except Exception as e:
-            translated_lines.append(line)
-            
-    return '\n'.join(translated_lines), is_translated
+    try:
+        # 1. Nhận diện ngôn ngữ 1 LẦN cho toàn bộ nội dung ô
+        source_code = smart_detect_lang(original_text)
+        
+        # 2. QUĂNG NGUYÊN CỤC TEXT VÀO MODEL (GPU sẽ tự động batching bên trong)
+        trans_text = do_translation(original_text, source_code, target_lang_code)
+        
+        is_translated = (trans_text != original_text)
+        return trans_text, is_translated
+        
+    except Exception as e:
+        # Nếu lỗi (rất hiếm), trả về text gốc để không làm hỏng file
+        return original_text, False
+    
+def process(input_path, output_dir, target_lang_code, progress_callback, cancel_event=None, log_callback=None):
+    # Hàm hỗ trợ in log ra Terminal hoặc UI
+    def log(msg):
+        if log_callback:
+            log_callback(msg)
+        else:
+            print(msg)
 
-def process(input_path, output_dir, target_lang_code, progress_callback, cancel_event=None):
-    print(f"\n{'='*50}")
-    print(f"[DEBUG] Start: {os.path.basename(input_path)}")
-    print(f"[DEBUG] Target Language: {target_lang_code.upper()}")
-    print(f"{'='*50}\n")
+    log(f"\n{'='*50}")
+    log(f"[INFO] Initializing Excel Translation Engine...")
+    log(f"[INFO] Target File: {os.path.basename(input_path)}")
+    log(f"[INFO] Target Language: {target_lang_code.upper()}")
+    log(f"{'='*50}\n")
 
+    log("[INFO] Loading Excel workbook into memory. Please wait...")
     wb = openpyxl.load_workbook(input_path, data_only=True)
     base_name = os.path.basename(input_path)
     file_name, file_ext = os.path.splitext(base_name)
@@ -84,8 +93,8 @@ def process(input_path, output_dir, target_lang_code, progress_callback, cancel_
 
     cells_to_translate = []
     
+    log("[INFO] Scanning worksheets for translatable content...")
     for sheet in wb.worksheets:
-        print(f"[DEBUG] Scanning Sheet: '{sheet.title}'")
         sheet_valid_cells = 0
         for row in sheet.iter_rows():
             for cell in row:
@@ -95,14 +104,15 @@ def process(input_path, output_dir, target_lang_code, progress_callback, cancel_
                         if re.search(r'[a-zA-Z\u4e00-\u9fffÀ-ỹ]', text):
                             cells_to_translate.append((sheet.title, cell))
                             sheet_valid_cells += 1
-        print(f"[DEBUG] -> Found {sheet_valid_cells} valid cells in Sheet '{sheet.title}'.\n")
+        log(f"[DEBUG] -> Sheet '{sheet.title}': Found {sheet_valid_cells} valid cells.")
                         
     total_items = len(cells_to_translate) + len(wb.worksheets)
     current_item = 0
     
-    print(f"[DEBUG] --- STARTING SHEET NAME TRANSLATION ---")
+    log("\n[INFO] Phase 1: Translating worksheet names...")
     for sheet in wb.worksheets:
         if cancel_event and cancel_event.is_set():
+            log("[WARNING] Translation cancelled by user during Phase 1.")
             return "Translation Cancelled by user."
 
         title = sheet.title
@@ -114,24 +124,19 @@ def process(input_path, output_dir, target_lang_code, progress_callback, cancel_
                 safe_title = re.sub(r'[\\/*?:\[\]]', '', translated_title)[:31]
                 sheet.title = safe_title
         except Exception as e:
-            print(f" [ERROR] Translating Sheet Name '{title}': {e}")
+            log(f"[ERROR] Failed to translate sheet name '{title}': {e}")
             
         current_item += 1
         progress_callback(current_item / total_items)
 
-    print(f"\n[DEBUG] --- STARTING CELL TRANSLATION (PARALLEL MODE) ---")
+    log("\n[INFO] Phase 2: Translating cell contents (GPU Optimized Mode)...")
     
-    print(f"\n[DEBUG] --- STARTING CELL TRANSLATION (PARALLEL MODE) ---")
+    # -- TỐI ƯU HÓA GPU TẠI ĐÂY --
+    # GPU cần ít luồng hơn CPU để tránh tràn VRAM. 2 đến 4 luồng là mức an toàn và nhanh nhất.
+    cpu_cores = os.cpu_count() or 4
+    MAX_WORKERS = min(4, cpu_cores) 
     
-    # -- CODE MỚI: TỰ ĐỘNG TÍNH TOÁN SỐ LUỒNG CHO EXCEL --
-    import os
-    cpu_cores = os.cpu_count() or 4 # Đo số nhân CPU, nếu lỗi không đo được thì mặc định là 4
-    
-    # Công thức: Gấp 1.5 lần số nhân CPU (Tối thiểu 4 luồng, Tối đa 32 luồng)
-    MAX_WORKERS = max(4, min(32, int(cpu_cores * 1.5))) 
-    
-    print(f"[DEBUG] System has {cpu_cores} CPU cores. Auto-set MAX_WORKERS = {MAX_WORKERS}")
-    # ---------------------------------------------------
+    log(f"[INFO] Hardware configuration applied: Using {MAX_WORKERS} concurrent threads to prevent GPU memory overflow.")
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_cell = {}
@@ -140,9 +145,13 @@ def process(input_path, output_dir, target_lang_code, progress_callback, cancel_
             future = executor.submit(worker_translate_cell, original_text, target_lang_code)
             future_to_cell[future] = (sheet_title, cell, original_text)
 
+        # Biến đếm để in log gọn gàng hơn
+        translated_count = 0
+        total_cells = len(cells_to_translate)
+
         for future in as_completed(future_to_cell):
             if cancel_event and cancel_event.is_set():
-                print("[DEBUG] Nhận lệnh Hủy, đang dừng các luồng...")
+                log("[WARNING] Translation abort signal received. Shutting down worker threads...")
                 executor.shutdown(wait=False, cancel_futures=True)
                 return "Translation Cancelled by user."
 
@@ -150,16 +159,20 @@ def process(input_path, output_dir, target_lang_code, progress_callback, cancel_
             try:
                 translated_text, is_translated = future.result()
                 cell.value = translated_text
-                
-                # In debug gọn lại để tránh spam terminal quá nhanh
-                if is_translated:
-                    pass 
             except Exception as e:
-                print(f" [LỖI] Tại ô {cell.coordinate} (Sheet '{sheet_title}'): {e}")
+                log(f"[ERROR] Cell {cell.coordinate} in Sheet '{sheet_title}': {e}")
 
             current_item += 1
+            translated_count += 1
             progress_callback(current_item / total_items)
 
+            # In log tiến độ mỗi 50 ô (tránh làm tràn UI/Terminal)
+            if translated_count % 50 == 0 or translated_count == total_cells:
+                percent = (translated_count / total_cells) * 100
+                log(f"[PROGRESS] Translated {translated_count}/{total_cells} cells ({percent:.1f}%) - Processing on GPU...")
+
+    log(f"\n[INFO] Saving translated workbook... Do not close the application.")
     wb.save(output_file)
-    print(f"\n[DEBUG]  FILE SAVED: {output_file}")
-    return f"Scanning completed! \nFile saved at: {output_file}"
+    log(f"[SUCCESS] File saved successfully at:\n{output_file}")
+    
+    return f"Translation completed successfully!\nFile saved at: {os.path.basename(output_file)}"

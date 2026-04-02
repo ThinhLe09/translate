@@ -12,7 +12,7 @@ import argostranslate.sbd
 import win32com.client
 import pythoncom 
 from concurrent.futures import ThreadPoolExecutor, as_completed # THÊM ĐA LUỒNG
-
+from functools import lru_cache
 # --- 1.  BYPASS STANZA 
 def offline_split_sentences(self, text):
     temp_text = re.sub(r'(?<=\d)\.(?=\d)', '___DOT___', text)
@@ -36,10 +36,12 @@ def fix_automotive_terms(text):
         text = text.replace(wrong, right)
     return text
 
+@lru_cache(maxsize=10)
 def get_translator(from_code, to_code):
     installed_languages = argostranslate.translate.get_installed_languages()
     lang_dict = {lang.code: lang for lang in installed_languages}
     if from_code in lang_dict and to_code in lang_dict:
+        # argos sẽ tự cache model vào RAM, ta chỉ việc return cái object này
         return lang_dict[from_code].get_translation(lang_dict[to_code])
     return None
 
@@ -288,14 +290,14 @@ def process_core(input_docx, output_file, target_lang_code, progress_callback, c
                     # Việc gán text ngược lại vào Object của Docx bắt buộc tuần tự để an toàn
                     replace_para_text_vip_pro(para, translated_text, para.text)
             except Exception as e:
-                print(f"[ERROR] Dịch đoạn văn thất bại: {e}")
+                print(f"[ERROR] Failed to translate paragraph: {e}")
                 
             current_item += 1
             progress_callback(current_item / total_items)
 
             if current_item % 50 == 0 or current_item == total_items:
                 percent = (current_item / total_items) * 100
-                log(f"Tiến độ: {current_item}/{total_items} ({percent:.1f}%) - Đang chạy max tốc độ...")
+                log(f"Process: {current_item}/{total_items} ({percent:.1f}%) -...")
 
     remove_personal_info_warning(doc)
     doc.save(output_file)

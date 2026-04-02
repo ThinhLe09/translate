@@ -3,6 +3,7 @@ import tempfile
 import uuid
 from pdf2docx import Converter
 from plugin import handle_word  
+from functools import lru_cache
 
 def process(input_path, output_dir, target_lang_code, progress_callback, cancel_event=None, log_callback=None):
     # Function: Nếu có log_callback của App thì xài, không thì in ra CMD

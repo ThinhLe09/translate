@@ -10,7 +10,7 @@ import customtkinter as ctk
 import webbrowser
 
 
-os.environ["ARGOS_DEVICE_TYPE"] = "cuda"
+os.environ["ARGOS_DEVICE_TYPE"] = "cpu"
 
 
 # Cấu hình log ngay từ đầu
@@ -293,7 +293,7 @@ class TranslatorApp(ctk.CTk):
             self.log(f"Processing file with format: {ext}")
 
             if ext in ['.xlsx', '.xls']:
-                result = handle_excel.process(input_path, output_dir, target_lang_code, self.update_progress, cancel_event=self.cancel_event)
+                result = handle_excel.process(input_path, output_dir, target_lang_code, self.update_progress, cancel_event=self.cancel_event,  log_callback=self.log)
             elif ext in ['.docx', '.doc']:
                 result = handle_word.process(input_path, output_dir, target_lang_code, self.update_progress, cancel_event=self.cancel_event, log_callback=self.log)
             elif ext == '.pdf':

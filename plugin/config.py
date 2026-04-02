@@ -5,7 +5,7 @@ import sys
 import argostranslate.sbd  
 import re  
 
-argostranslate.settings.device = "cuda"
+argostranslate.settings.device = "cpu"
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:

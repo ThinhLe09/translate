@@ -3,7 +3,7 @@ import re
 from langdetect import detect
 import argostranslate.translate
 import argostranslate.sbd
-
+from functools import lru_cache
 def is_binary_file(filepath):
 
     try:
@@ -24,10 +24,12 @@ for name, obj in vars(argostranslate.sbd).items():
     if isinstance(obj, type) and hasattr(obj, 'split_sentences'):
         setattr(obj, 'split_sentences', offline_split_sentences)
 
+@lru_cache(maxsize=10)
 def get_translator(from_code, to_code):
     installed_languages = argostranslate.translate.get_installed_languages()
     lang_dict = {lang.code: lang for lang in installed_languages}
     if from_code in lang_dict and to_code in lang_dict:
+        # argos sẽ tự cache model vào RAM, ta chỉ việc return cái object này
         return lang_dict[from_code].get_translation(lang_dict[to_code])
     return None
 
