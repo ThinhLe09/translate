@@ -3,14 +3,30 @@
 import csv
 import os
 from datetime import datetime
+from plugin.config import BASE_DIR
+import csv
+import os
+import sys
+from datetime import datetime
 
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-TRACKING_DIR = os.path.join(BASE_DIR, 'tracking')
+# Cách lấy đường dẫn AppData an toàn nhất trên Windows
+# Nó sẽ ra dạng: C:\Users\<Tên_User>\AppData\Roaming
+APPDATA_PATH = os.environ.get('APPDATA') 
+
+# Nếu chạy trên môi trường không phải Windows (hiếm khi với tool Bosch) 
+# thì dự phòng bằng thư mục home
+if not APPDATA_PATH:
+    APPDATA_PATH = os.path.expanduser("~")
+
+# Tạo folder định danh riêng cho Tool để không lẫn với app khác
+TOOL_DATA_DIR = os.path.join(APPDATA_PATH, 'Bosch_Subtitle_Tool')
+TRACKING_DIR = os.path.join(TOOL_DATA_DIR, 'tracking')
+
+# Lệnh này cực kỳ quan trọng: nó sẽ tự tạo cả mớ folder nếu chưa có
 os.makedirs(TRACKING_DIR, exist_ok=True)
+
 TRACKING_FILE = os.path.join(TRACKING_DIR, 'user_tracking.csv')
-BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-TRACKING_DIR = os.path.join(BASE_DIR, 'tracking')
-os.makedirs(TRACKING_DIR, exist_ok=True)
+
 def log_event(event_type, purpose=None, file_name=None, file_type=None, target_lang=None, extra=None):
     
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

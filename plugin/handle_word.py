@@ -11,6 +11,7 @@ import argostranslate.translate
 import argostranslate.sbd
 import win32com.client
 import pythoncom 
+from concurrent.futures import ThreadPoolExecutor, as_completed # THÊM ĐA LUỒNG
 
 # --- 1.  BYPASS STANZA 
 def offline_split_sentences(self, text):
@@ -21,7 +22,6 @@ def offline_split_sentences(self, text):
 for name, obj in vars(argostranslate.sbd).items():
     if isinstance(obj, type) and hasattr(obj, 'split_sentences'):
         setattr(obj, 'split_sentences', offline_split_sentences)
-# ------------------------------------------------------
 
 def fix_automotive_terms(text):
     dict_replacements = {
@@ -35,7 +35,6 @@ def fix_automotive_terms(text):
     for wrong, right in dict_replacements.items():
         text = text.replace(wrong, right)
     return text
-# ------------------------------------------------------
 
 def get_translator(from_code, to_code):
     installed_languages = argostranslate.translate.get_installed_languages()
@@ -201,9 +200,6 @@ def replace_para_text_vip_pro(para, translated_text, original_text):
     text_runs = [run for run in para.runs if run.text.strip()]
     if not text_runs: return
     
-    # --- DECISION POINT: RESCUE ASTROLOGY ---
-    # Find the Run (small segment) with the most text to act as the "Host".
-    # Prevent mistakenly injecting text into the first Run (usually bullet/icon using Wingdings font)
     host_run = max(text_runs, key=lambda r: len(r.text.strip()))
     
     for run in text_runs:
@@ -236,6 +232,13 @@ def remove_personal_info_warning(doc):
             tag.getparent().remove(tag)
     except: pass
 
+# Hàm worker đa luồng
+def worker_translate_para(original_text, target_lang_code):
+    try:
+        return translate_text_block(original_text, target_lang_code)
+    except Exception:
+        return original_text
+
 def process_core(input_docx, output_file, target_lang_code, progress_callback, cancel_event=None, log_callback=None):
     def log(msg):
         if log_callback: log_callback(msg)
@@ -249,28 +252,50 @@ def process_core(input_docx, output_file, target_lang_code, progress_callback, c
     
     if total_items == 0: return "No content found to translate."
 
-    log(f"Total paragraphs to translate: {total_items}. Please be patient...")
+    log(f"Total paragraphs to translate: {total_items}. Kích hoạt Parallel Processing...")
 
     current_item = 0
-    for para in items_to_translate:
-        if cancel_event and cancel_event.is_set():
-            log("🛑 User requested cancellation. Saving temporary file...")
-            remove_personal_info_warning(doc)
-            doc.save(output_file)
-            return f"Translation cancelled!\nPartial file saved at: {os.path.basename(output_file)}"
+    
+    # -- CODE MỚI: TỰ ĐỘNG TÍNH TOÁN SỐ LUỒNG CHO WORD --
+    import os
+    cpu_cores = os.cpu_count() or 4 
+    
+    # Công thức: Bằng 75% số nhân CPU (Tối thiểu 2 luồng, Tối đa 12 luồng)
+    # Tránh bung quá nhiều luồng làm nghẽn CPU khi parse cấu trúc XML của Word
+    MAX_WORKERS = max(2, min(12, int(cpu_cores * 0.75))) 
+    
+    print(f"[DEBUG] System has {cpu_cores} CPU cores. Auto-set MAX_WORKERS = {MAX_WORKERS} for Word doc")
+    # ---------------------------------------------------
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_para = {}
+        for para in items_to_translate:
+            future = executor.submit(worker_translate_para, para.text, target_lang_code)
+            future_to_para[future] = para
 
-        original_text = para.text
-        translated_text = translate_text_block(original_text, target_lang_code)
-        
-        if translated_text != original_text:
-            replace_para_text_vip_pro(para, translated_text, original_text)
-            
-        current_item += 1
-        progress_callback(current_item / total_items)
+        for future in as_completed(future_to_para):
+            if cancel_event and cancel_event.is_set():
+                log("🛑 User requested cancellation. Saving temporary file...")
+                executor.shutdown(wait=False, cancel_futures=True)
+                remove_personal_info_warning(doc)
+                doc.save(output_file)
+                return f"Translation cancelled!\nPartial file saved at: {os.path.basename(output_file)}"
 
-        if current_item % 20 == 0 or current_item == total_items:
-            percent = (current_item / total_items) * 100
-            log(f"Tiến độ: {current_item}/{total_items} ({percent:.1f}%) - Vẫn đang dịch...")
+            para = future_to_para[future]
+            try:
+                translated_text = future.result()
+                if translated_text != para.text:
+                    # Việc gán text ngược lại vào Object của Docx bắt buộc tuần tự để an toàn
+                    replace_para_text_vip_pro(para, translated_text, para.text)
+            except Exception as e:
+                print(f"[ERROR] Dịch đoạn văn thất bại: {e}")
+                
+            current_item += 1
+            progress_callback(current_item / total_items)
+
+            if current_item % 50 == 0 or current_item == total_items:
+                percent = (current_item / total_items) * 100
+                log(f"Tiến độ: {current_item}/{total_items} ({percent:.1f}%) - Đang chạy max tốc độ...")
 
     remove_personal_info_warning(doc)
     doc.save(output_file)

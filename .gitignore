@@ -3,3 +3,5 @@ dist/
 model/
 __pycache__/
 test/
+dist_/
+dist_2/

@@ -4,6 +4,7 @@ import re
 from langdetect import detect
 import argostranslate.translate
 import argostranslate.sbd
+from concurrent.futures import ThreadPoolExecutor, as_completed # THÊM THƯ VIỆN ĐA LUỒNG
 
 def offline_split_sentences(self, text):
     sentences = re.split(r'(?<=[.!?。！？])\s*', text)
@@ -48,7 +49,28 @@ def do_translation(text, source_code, target_lang_code):
             return trans_to_target.translate(en_text)
     return text
 
-def process(input_path, output_dir, target_lang_code, progress_callback):
+# Hàm con được tách ra để chạy đa luồng
+def worker_translate_cell(original_text, target_lang_code):
+    lines = original_text.splitlines(keepends=False)
+    translated_lines = []
+    is_translated = False 
+
+    for line in lines:
+        if not line.strip():
+            translated_lines.append("")
+            continue
+        try:
+            source_code = smart_detect_lang(line)
+            trans_line = do_translation(line, source_code, target_lang_code)
+            translated_lines.append(trans_line)
+            if trans_line != line:
+                is_translated = True
+        except Exception as e:
+            translated_lines.append(line)
+            
+    return '\n'.join(translated_lines), is_translated
+
+def process(input_path, output_dir, target_lang_code, progress_callback, cancel_event=None):
     print(f"\n{'='*50}")
     print(f"[DEBUG] Start: {os.path.basename(input_path)}")
     print(f"[DEBUG] Target Language: {target_lang_code.upper()}")
@@ -80,6 +102,9 @@ def process(input_path, output_dir, target_lang_code, progress_callback):
     
     print(f"[DEBUG] --- STARTING SHEET NAME TRANSLATION ---")
     for sheet in wb.worksheets:
+        if cancel_event and cancel_event.is_set():
+            return "Translation Cancelled by user."
+
         title = sheet.title
         try:
             source_code = smart_detect_lang(title)
@@ -87,51 +112,53 @@ def process(input_path, output_dir, target_lang_code, progress_callback):
             
             if translated_title != title:
                 safe_title = re.sub(r'[\\/*?:\[\]]', '', translated_title)[:31]
-                print(f"[DEBUG] Sheet Name: '{title}' [{source_code}] -> '{safe_title}'")
                 sheet.title = safe_title
-            else:
-                print(f"[DEBUG] Skipping Sheet Name: '{title}' (No translation needed)")
         except Exception as e:
             print(f" [ERROR] Translating Sheet Name '{title}': {e}")
             
         current_item += 1
         progress_callback(current_item / total_items)
 
-    print(f"\n[DEBUG] --- STARTING CELL TRANSLATION ---")
-    for sheet_title, cell in cells_to_translate:
-        original_text = str(cell.value)
-        lines = original_text.splitlines(keepends=False)
-        translated_lines = []
-        is_translated = False 
+    print(f"\n[DEBUG] --- STARTING CELL TRANSLATION (PARALLEL MODE) ---")
+    
+    print(f"\n[DEBUG] --- STARTING CELL TRANSLATION (PARALLEL MODE) ---")
+    
+    # -- CODE MỚI: TỰ ĐỘNG TÍNH TOÁN SỐ LUỒNG CHO EXCEL --
+    import os
+    cpu_cores = os.cpu_count() or 4 # Đo số nhân CPU, nếu lỗi không đo được thì mặc định là 4
+    
+    # Công thức: Gấp 1.5 lần số nhân CPU (Tối thiểu 4 luồng, Tối đa 32 luồng)
+    MAX_WORKERS = max(4, min(32, int(cpu_cores * 1.5))) 
+    
+    print(f"[DEBUG] System has {cpu_cores} CPU cores. Auto-set MAX_WORKERS = {MAX_WORKERS}")
+    # ---------------------------------------------------
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_cell = {}
+        for sheet_title, cell in cells_to_translate:
+            original_text = str(cell.value)
+            future = executor.submit(worker_translate_cell, original_text, target_lang_code)
+            future_to_cell[future] = (sheet_title, cell, original_text)
 
-        for line in lines:
-            if not line.strip():
-                translated_lines.append("")
-                continue
-                
+        for future in as_completed(future_to_cell):
+            if cancel_event and cancel_event.is_set():
+                print("[DEBUG] Nhận lệnh Hủy, đang dừng các luồng...")
+                executor.shutdown(wait=False, cancel_futures=True)
+                return "Translation Cancelled by user."
+
+            sheet_title, cell, original_text = future_to_cell[future]
             try:
-                source_code = smart_detect_lang(line)
-                trans_line = do_translation(line, source_code, target_lang_code)
-                translated_lines.append(trans_line)
+                translated_text, is_translated = future.result()
+                cell.value = translated_text
                 
-                if trans_line != line:
-                    is_translated = True
+                # In debug gọn lại để tránh spam terminal quá nhanh
+                if is_translated:
+                    pass 
             except Exception as e:
                 print(f" [LỖI] Tại ô {cell.coordinate} (Sheet '{sheet_title}'): {e}")
-                translated_lines.append(line)
-        
-        cell.value = '\n'.join(translated_lines)
-        
-        preview_orig = original_text.replace('\n', ' ')[:30]
-        if is_translated:
-            preview_trans = cell.value.replace('\n', ' ')[:30]
-            print(f"[DEBUG]  Sheet '{sheet_title}' | Ô {cell.coordinate} | Dịch: '{preview_orig}...' -> '{preview_trans}...'")
-        else:
-            # Nếu code quyết định không dịch, in ra để xem tại sao (do cùng ngôn ngữ hay detect sai)
-            print(f"[DEBUG] Skipping Cell {cell.coordinate} (Sheet '{sheet_title}') | Original: '{preview_orig}...'")
 
-        current_item += 1
-        progress_callback(current_item / total_items)
+            current_item += 1
+            progress_callback(current_item / total_items)
 
     wb.save(output_file)
     print(f"\n[DEBUG]  FILE SAVED: {output_file}")

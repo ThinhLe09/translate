@@ -5,6 +5,12 @@ import sys
 import argostranslate.sbd  
 import re  
 
+argostranslate.settings.device = "cuda"
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 def offline_split_sentences(self, text):
     sentences = re.split(r'(?<=[.!?。！？\n])\s*', text)
     return [s.strip() for s in sentences if s.strip()]

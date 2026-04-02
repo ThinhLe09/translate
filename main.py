@@ -10,6 +10,8 @@ import customtkinter as ctk
 import webbrowser
 
 
+os.environ["ARGOS_DEVICE_TYPE"] = "cuda"
+
 
 # Cấu hình log ngay từ đầu
 log_path = os.path.join(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__), "debug_log.txt")
